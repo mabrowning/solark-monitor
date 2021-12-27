@@ -1,0 +1,11 @@
+[Unit]
+Description=SolArk Inverter Power Monitoring
+After=multi-user.target
+
+[Service]
+Restart=on-failure
+RestartSec=5s
+ExecStart=/usr/bin/python3 /home/pi/solar-monitor/main.py
+
+[Install]
+WantedBy=multi-user.target
