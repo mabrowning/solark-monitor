@@ -1,7 +1,7 @@
 <head>
 <style>
 body {
-	background-color: black;
+    background-color: black;
 }
 table {
    background-color: black;
@@ -14,22 +14,30 @@ p {
 
 </style>
 </head>
-
 <body>
-	<div id='myDiv'><!-- Plotly chart will be drawn inside this DIV --></div>
-	<table width=100% height=100%>
-		<tr>
-			<td><p>Grid</p><span id="limit_power"></td>
-			<td><p>Solar</p><span id="dc_power_pv"></td>
-			<td><p>Battery</p><span id="batt_power"></td>
-		</tr>
-		<tr>
-			<td><p>House</p><span id="house_power"></td>
-			<td><p>Load</p><span id="load_power"></td>
-			<td><p>Battery%</p><span id="batt_soc"></td>
-		</tr>
-	</table>
+    <div id='myDiv'><!-- Plotly chart will be drawn inside this DIV --></div>
+    <table width=100% height=100%>
+        <tr>
+            <td><p>Grid</p><span id="limit_power"></td>
+            <td><p>Solar</p><span id="dc_power_pv"></td>
+            <td><p>Battery</p><span id="batt_power"></td>
+        </tr>
+        <tr>
+            <td><p>House</p><span id="house_power"></td>
+            <td><p>Load</p><span id="load_power"></td>
+            <td><p>Battery%</p><span id="batt_soc"></td>
+        </tr>
+    </table>
 <script>
+const query = "SELECT mean(/limit|dc_power_pv|batt|house|load/) FROM readings GROUP BY time(1m)"
+fetch("api/v1/query?db=inverter&q=" + query)
+  .then( response => response.json() )
+    .then( json => {
+        const data = json.results[0].series[0];
+        console.log(data) 
+    })
+  .catch( error => console.error('error:', error) );
+
 var socket;
 var timerId;
 function listenChanges() {
@@ -37,11 +45,11 @@ function listenChanges() {
 
     socket.onmessage = function(event) {
         // your subscription stuff
-	  var msg = JSON.parse(event.data);
-	  Object.entries(msg).forEach(([k,v]) => {
-	    var el = document.getElementById(k);
-	    if (el) el.innerText = v;
-	  });
+      var msg = JSON.parse(event.data);
+      Object.entries(msg).forEach(([k,v]) => {
+        var el = document.getElementById(k);
+        if (el) el.innerText = v;
+      });
     };
 
     socket.onerror = function() {
@@ -57,6 +65,7 @@ function listenChanges() {
             }, 10000);
         };
     };
+
 }
 listenChanges();
 </script>

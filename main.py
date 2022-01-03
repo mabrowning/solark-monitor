@@ -3,7 +3,16 @@
 import asyncio
 import logging
 import concurrent.futures
-#logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(
+    format='%(asctime)s %(levelname)-8s %(name)s %(message)s',
+    level=logging.INFO,
+    datefmt='%Y-%m-%d %H:%M:%S',
+)
+# quiet pymodbus, which seems to be working :)
+logging.getLogger("pymodbus").setLevel(logging.INFO)
+logging.getLogger("websockets").setLevel(logging.INFO)
+
+import traceback
 
 from pymodbus.client.asynchronous.async_io import (
     AsyncioModbusSerialClient,
@@ -14,6 +23,7 @@ from pymodbus.factory import ClientDecoder
 import websockets
 
 from asyncio_multisubscriber_queue import MultisubscriberQueue
+import aioinflux
 
 import json
 import numpy as np
@@ -53,7 +63,6 @@ class Inverter(AsyncioModbusSerialClient):
         registers[166:179] = await self.read(166,179-166)
         registers[184:191] = await self.read(184,191-184)
         datapoint = {
-            "load_power_in": registers[166],
             "grid_power": registers[169],
             "limit_power": registers[172],
             "inv_power": registers[175],
@@ -70,7 +79,6 @@ def combine_fields(datapoints):
         "dc_power_pv",
         "batt_power",
 
-        "load_power_in",
         "grid_power",
         "limit_power",
         "inv_power",
@@ -83,20 +91,6 @@ def combine_fields(datapoints):
     fields["batt_soc"] = int(datapoints[0]["batt_soc"])
     fields["house_power"] = fields["limit_power"] - fields["grid_power"]
     return fields
-
-async def read_and_publish(invs, callbacks):
-    logging.debug("Start read_and_publish")
-    try:
-        datapoints = await asyncio.gather(*[inv.datapoint() for inv in invs])
-    except concurrent.futures.TimeoutError:
-        logging.debug("Inverter read timeout")
-        return
-    datapoint = combine_fields(datapoints)
-    for callback in callbacks:
-        logging.debug("DataPoint: "+str(datapoint))
-        await callback(datapoint)
-        # asyncio.ensure_future(callback(datapoint))
-    logging.debug("Done read_and_publish")
 
 def main():
     loop = asyncio.get_event_loop()
@@ -116,20 +110,73 @@ def main():
             channel = mqueue.subscribe()
             logging.debug("Client Connected: " + str(id(channel)))
             async for data in channel:
+                data = dict(data)
+                data['time'] = data['time'].isoformat()
                 try:
-                    logging.debug("Sending: " + str(id(channel)))
                     await websocket.send(json.dumps(data))
                 except websockets.exceptions.ConnectionClosed:
                     logging.debug("Disconnect: " + str(id(channel)))
                     return
         await websockets.serve(serve, '0.0.0.0', 8765)
 
-        print("Connected and serving. Entering main loop")
-        callbacks = [mqueue.put]
+        # InfluxDB publisher
+        async def influxdb(q):
+            dataPoints = []
+            async with aioinflux.InfluxDBClient(
+                host='pi-plex.local',
+                username='influx',
+                password='influx',
+                db='inverter',
+            ) as client:
+                logging.info("Starting InfluxDBClient")
+                while True:
+                    data = await q.get()
+                    data = dict(data) # copy, since we're modifying
+                    time = data.pop("time")
+                    dataPoints.append(
+                        {
+                            "measurement": "readings",
+                            "tags": {"inverter": "comb"},
+                            "fields": data,
+                            "time": time
+                        }
+                    )
+
+                    if q.qsize() == 0 and len(dataPoints) >= 30:
+                        logging.debug(
+                            f"Writing {len(dataPoints)} to influx"
+                        )
+                        await client.write(dataPoints)
+                        dataPoints = []
+                logging.info("Stopping InfluxDBClient")
+
+        async def loop_influxdb():
+            with mqueue.queue() as q:
+                while True:
+                    try:
+                        await influxdb(q)
+                    except:
+                        traceback.print_exc()
+        influxdb_task = asyncio.ensure_future(loop_influxdb())
+
+        logging.info("Connected and serving. Entering main loop")
+
+        async def loop_step():
+            timestamp = datetime.datetime.utcnow()
+            try:
+                datapoints = await asyncio.gather(*[inv.datapoint() for inv in (c1, c2)])
+            except concurrent.futures.TimeoutError:
+                logging.warning("Inverter read timeout")
+                return
+            datapoint = combine_fields(datapoints)
+            # logging.debug("DataPoint: "+str(datapoint))
+            datapoint['time'] = timestamp
+            await mqueue.put(datapoint)
+
         while True:
             # run no more frequently than once per second
             await asyncio.gather(
-                read_and_publish((c1, c2), callbacks),
+                loop_step(),
                 asyncio.sleep(1)
             )
 

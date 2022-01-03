@@ -5,7 +5,7 @@ After=multi-user.target
 [Service]
 Restart=on-failure
 RestartSec=5s
-ExecStart=/usr/bin/python3 /home/pi/solar-monitor/main.py
+ExecStart=/usr/bin/python3 /home/pi/solark-monitor/main.py
 
 [Install]
 WantedBy=multi-user.target
