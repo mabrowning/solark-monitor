@@ -3,53 +3,201 @@
 body {
     background-color: black;
 }
-table {
-   background-color: black;
-   color: white;
-   font-size: 120px;
+canvas, body {
+    margin: 0px;
+    padding: 0px;
 }
-p {
-   font-size: 60px;
+
+.label {
+  position: absolute;
+  font-size: 80px;
+  text-align: right;
+  height: 80px;
+  width: 200px;
+}
+#dc_power_pv {
+  top: 45px;
+  left: 170px;
+  color: rgb(255, 204, 0);
+}
+#batt_power {
+  top: 220px;
+  left: 170px;
+  color: rgb(115, 191, 105);
+}
+#batt_soc {
+  top: 300px;
+  left: 170px;
+  color: rgb(115, 191, 105);
+}
+#limit_power {
+  top: 45px;
+  left: 910px;
+  color: rgb(113, 92, 166);
+}
+#house_power {
+  top: 275px;
+  left: 910px;
+  color: rgb(244, 77, 92);
 }
 
 </style>
 </head>
 <body>
-    <div id='myDiv'><!-- Plotly chart will be drawn inside this DIV --></div>
-    <table width=100% height=100%>
-        <tr>
-            <td><p>Grid</p><span id="limit_power"></td>
-            <td><p>Solar</p><span id="dc_power_pv"></td>
-            <td><p>Battery</p><span id="batt_power"></td>
-        </tr>
-        <tr>
-            <td><p>House</p><span id="house_power"></td>
-            <td><p>Load</p><span id="load_power"></td>
-            <td><p>Battery%</p><span id="batt_soc"></td>
-        </tr>
-    </table>
+    <div style="width: 100%; height: 50%">
+      <object id="svg" type="image/svg+xml" style="position: absolute; top: 0px; left: 0px;" data="/solar.svg"></object>
+      <div class="label" id="dc_power_pv"></div>
+      <div class="label" id="batt_power"></div>
+      <div class="label" id="batt_soc"></div>
+      <div class="label" id="limit_power"></div>
+      <div class="label" id="house_power"></div>
+    </div>
+    <canvas style="display:inline-block; width: 67%; height:50%" id="slow_plot"></canvas><canvas style="display:inline-block; width: 33%; height:50%" id="fast_plot"></canvas>
+<script src="https://cdn.jsdelivr.net/gh/danchitnis/webgl-plot@master/dist/webglplot.umd.min.js"></script>
+
 <script>
-const query = "SELECT mean(/limit|dc_power_pv|batt|house|load/) FROM readings GROUP BY time(1m)"
-fetch("api/v1/query?db=inverter&q=" + query)
-  .then( response => response.json() )
-    .then( json => {
+const ColorRGBA = WebglPlotBundle.ColorRGBA;
+const WebglLine = WebglPlotBundle.WebglLine;
+const WebglPlot = WebglPlotBundle.WebglPlot;
+
+// Goldenrod
+const solarColor = new ColorRGBA(1.00, 0.80, 0.00, 1);
+// Green
+const battColor  = new ColorRGBA(0.45, 0.74, 0.41, 1);
+// Purple
+const gridColor  = new ColorRGBA(0.44, 0.36, 0.65, 1);
+// Coral
+const houseColor = new ColorRGBA(0.95, 0.30, 0.36, 1);
+
+function setup(canvas, start, end) {
+  const devicePixelRatio = window.devicePixelRatio || 1;
+  canvas.width = canvas.clientWidth * devicePixelRatio;
+  canvas.height = canvas.clientHeight * devicePixelRatio;
+  start = start || canvas.width;
+  end = end || 0;
+  var interval = (start-end) / canvas.width;
+  if (interval > 1) interval = Math.floor(interval);
+  const numX = Math.ceil((start-end) / interval);
+  start = numX * interval + end;
+  const plot = new WebglPlot(canvas);
+  plot.gOffsetY = -0.95; // all values are positive, so 0 -> -1
+  const solar = new WebglLine(solarColor, numX);
+  const house = new WebglLine(houseColor, numX);
+  const batt  = new WebglLine(battColor, numX);
+  solar.arrangeX();
+  house.arrangeX();
+  batt.arrangeX();
+  plot.addLine(solar);
+  plot.addLine(house);
+  plot.addLine(batt);
+
+  return {
+    "plot": plot,
+    "interval": Math.floor(interval),
+    "start": start,
+    "end": end,
+    "solar": solar,
+    "house": house,
+    "batt": batt,
+  };
+}
+const fastCanvas = document.getElementById("fast_plot");
+var fast = setup(fastCanvas);
+
+const slowCanvas = document.getElementById("slow_plot");
+var slow = setup(slowCanvas, 12*60*60, fast.start);
+
+function lineMaxY(line) {
+  var max = 0;
+  for (let i = 0; i < line.numPoints; i++) {
+    const y = line.getY(i);
+    if (y > max) max = y;
+  }
+  return max;
+}
+function rescale() {
+  const max = Math.max(
+    lineMaxY(slow.solar), lineMaxY(slow.house), lineMaxY(slow.batt),
+    lineMaxY(fast.solar), lineMaxY(fast.house), lineMaxY(fast.batt)
+  ) * 1.1;
+  if (max == 0) {
+    return false;
+  }
+  const scale = 2/max;
+  if (scale != slow.plot.gScaleY) {
+    slow.plot.gScaleY = scale;
+    fast.plot.gScaleY = scale;
+    return true;
+  }
+  return false;
+}
+
+function lineShiftY(line, value) {
+  for (let i = 0; i < line.numPoints - 1; i++) {
+    line.setY(i, line.getY(i+1));
+  }
+  line.setY(line.numPoints-1, value);
+}
+
+function influxUpdate(group) {
+  var query;
+  if (group.interval > 1) {
+    query = "SELECT mean(/dc_power_pv|house|load/) FROM readings " +
+      "WHERE time >= now() - "+group.start+"s AND time < now() - "+group.end+"s "+
+      "GROUP BY time("+group.interval+"s)";
+  } else {
+    query = "SELECT /dc_power_pv|house|load/ FROM readings " +
+      "WHERE time >= now() - "+group.start+"s AND time < now() - "+group.end+"s";
+  }
+  fetch("api/v1/query?db=inverter&q=" + query)
+    .then( response => response.json() )
+      .then( json => {
         const data = json.results[0].series[0];
-        console.log(data) 
-    })
-  .catch( error => console.error('error:', error) );
+        for (let i = 0; i < group.solar.numPoints && i < data.values.length; i++) {
+          group.solar.setY(i, data.values[i][1]);
+          group.house.setY(i, data.values[i][2] + data.values[i][3]);
+        }
+
+        rescale();
+        group.plot.update();
+          
+      })
+    .catch( error => console.error('error:', error) );
+}
+// Fetch data at page load
+influxUpdate(fast);
+influxUpdate(slow);
 
 var socket;
 var timerId;
+var fastUpdates = 0;
+const solarLabel = document.getElementById("dc_power_pv");
+const battPowerLabel = document.getElementById("batt_power");
+const battSocLabel = document.getElementById("batt_soc");
+const gridLabel = document.getElementById("limit_power");
+const houseLabel = document.getElementById("house_power");
+
 function listenChanges() {
     socket = new WebSocket(`ws://${window.location.host}:8765/`);
 
     socket.onmessage = function(event) {
-        // your subscription stuff
       var msg = JSON.parse(event.data);
-      Object.entries(msg).forEach(([k,v]) => {
-        var el = document.getElementById(k);
-        if (el) el.innerText = v;
-      });
+      solarLabel.innerText = msg.dc_power_pv;
+      battPowerLabel.innerText = msg.batt_power;
+      battSocLabel.innerText = msg.batt_soc + "%";
+      gridLabel.innerText = msg.limit_power;
+      houseLabel.innerText = msg.load_power + msg.house_power;
+
+      lineShiftY(fast.solar, msg.dc_power_pv);
+      lineShiftY(fast.house, msg.load_power + msg.house_power);
+      if (rescale()) {
+        slow.plot.update()
+      }
+      fast.plot.update()
+      if (fastUpdates++ > slow.interval) {
+        fastUpdates = 0;
+        influxUpdate(slow);
+      }
     };
 
     socket.onerror = function() {
@@ -68,5 +216,6 @@ function listenChanges() {
 
 }
 listenChanges();
+
 </script>
 </body>
